@@ -386,8 +386,26 @@ class GameService
 
     public function listGameFiles(Game $game): Collection
     {
-        return $game->gameFiles()->with('file')->get()
+        return $game->gameFiles()->with('file')->orderBy('path')->orderBy('name')->get()
             ->map(fn (GameFile $gameFile) => $this->serializeGameFile($gameFile));
+    }
+
+    public function createGameFolder(Game $game, User $user, string $name, ?string $path = null): GameFile
+    {
+        $this->assertParticipant($game, $user);
+
+        $gameFile = $game->gameFiles()->create([
+            'kind' => 'folder',
+            'name' => $name,
+            'path' => normalizeGameFilePath($path),
+            'file_id' => null,
+        ])->load('file');
+
+        $this->dispatchBroadcastSafely(new GameRealtimeEvent($game, 'game-file.created', [
+            'files' => [$this->serializeGameFile($gameFile)],
+        ]));
+
+        return $gameFile;
     }
 
     public function uploadGameFiles(Game $game, User $user, string $disk, array $uploadedFiles, ?string $path = null): Collection
@@ -399,8 +417,9 @@ class GameService
 
         $records = $files->map(fn (File $file) => [
             'game_id' => $game->id,
+            'kind' => 'image',
             'name' => $file->original_name,
-            'path' => $path,
+            'path' => normalizeGameFilePath($path),
             'file_id' => $file->id,
             'created_at' => $now,
             'updated_at' => $now,
@@ -423,8 +442,9 @@ class GameService
         $this->assertGameFile($game, $gameFile);
 
         $gameFile->update([
+            'kind' => $data['kind'] ?? $gameFile->kind,
             'name' => $data['name'] ?? $gameFile->name,
-            'path' => $data['path'] ?? $gameFile->path,
+            'path' => array_key_exists('path', $data) ? normalizeGameFilePath($data['path']) : $gameFile->path,
         ]);
 
         $this->dispatchBroadcastSafely(new GameRealtimeEvent($game, 'game-file.updated', [
@@ -440,8 +460,23 @@ class GameService
         $this->assertGameFile($game, $gameFile);
 
         $gameFileId = $gameFile->id;
-        DB::transaction(function () use ($gameFile): void {
+        $deletedEntityIds = [];
+
+        DB::transaction(function () use ($game, $gameFile, &$deletedEntityIds): void {
             $file = $gameFile->file;
+
+            if ($gameFile->file_id) {
+                $entities = Entity::query()
+                    ->where('file_id', $gameFile->file_id)
+                    ->whereHas('page', fn ($query) => $query->where('game_id', $game->id))
+                    ->get();
+
+                foreach ($entities as $entity) {
+                    $deletedEntityIds[] = $entity->id;
+                    $entity->delete();
+                }
+            }
+
             $gameFile->delete();
 
             if ($file) {
@@ -449,8 +484,15 @@ class GameService
             }
         });
 
+        foreach ($deletedEntityIds as $entityId) {
+            $this->dispatchBroadcastSafely(new GameRealtimeEvent($game, 'entity.deleted', [
+                'entity_id' => $entityId,
+            ]));
+        }
+
         $this->dispatchBroadcastSafely(new GameRealtimeEvent($game, 'game-file.deleted', [
             'game_file_id' => $gameFileId,
+            'deleted_entity_ids' => $deletedEntityIds,
         ]));
     }
 
@@ -487,6 +529,11 @@ class GameService
         } elseif (! empty($data['game_file_id'])) {
             $gameFile = GameFile::query()->with('file')->findOrFail($data['game_file_id']);
             $this->assertGameFile($game, $gameFile);
+            if (($gameFile->kind ?? 'image') !== 'image' || ! $gameFile->file_id) {
+                throw ValidationException::withMessages([
+                    'game_file_id' => ['Only image library items can be used to create a token.'],
+                ]);
+            }
             $fileId = $gameFile->file_id;
         }
 
@@ -792,6 +839,7 @@ class GameService
         return [
             'id' => $gameFile->id,
             'game_id' => $gameFile->game_id,
+            'kind' => $gameFile->kind ?? 'image',
             'name' => $gameFile->name,
             'path' => $gameFile->path,
             'file' => $gameFile->file ? [
@@ -1054,4 +1102,15 @@ class GameService
             ]);
         }
     }
+}
+
+function normalizeGameFilePath(?string $path): ?string
+{
+    $normalized = trim((string) $path);
+
+    if ($normalized === '' || $normalized === '/') {
+        return null;
+    }
+
+    return trim($normalized, '/');
 }

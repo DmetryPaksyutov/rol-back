@@ -24,19 +24,30 @@ class GameFileController extends Controller
     public function store(Game $game, Request $request): JsonResponse
     {
         $data = $request->validate([
-            'disk' => ['required', 'string'],
+            'kind' => ['nullable', 'string', 'in:image,folder'],
+            'name' => ['nullable', 'string', 'max:255'],
+            'disk' => ['required_unless:kind,folder', 'string'],
             'path' => ['nullable', 'string', 'max:255'],
-            'files' => ['required', 'array', 'min:1'],
+            'files' => ['required_unless:kind,folder', 'array', 'min:1'],
             'files.*' => ['required', 'file'],
         ]);
 
-        $files = $this->gameService->uploadGameFiles(
-            $game,
-            $request->user(),
-            $data['disk'],
-            $request->file('files', []),
-            $data['path'] ?? null
-        );
+        $files = ($data['kind'] ?? 'image') === 'folder'
+            ? collect([
+                $this->gameService->createGameFolder(
+                    $game,
+                    $request->user(),
+                    $data['name'] ?? 'Новая папка',
+                    $data['path'] ?? null
+                ),
+            ])
+            : $this->gameService->uploadGameFiles(
+                $game,
+                $request->user(),
+                $data['disk'],
+                $request->file('files', []),
+                $data['path'] ?? null
+            );
 
         return response()->json([
             'message' => 'Game files uploaded.',
@@ -47,6 +58,7 @@ class GameFileController extends Controller
     public function update(Game $game, GameFile $gameFile, Request $request): JsonResponse
     {
         $data = $request->validate([
+            'kind' => ['sometimes', 'string', 'in:image,folder'],
             'name' => ['sometimes', 'string', 'max:255'],
             'path' => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);

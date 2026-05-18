@@ -12,6 +12,7 @@ class GameFile extends Model
 
     protected $fillable = [
         'game_id',
+        'kind',
         'name',
         'path',
         'file_id',
